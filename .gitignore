@@ -24,6 +24,9 @@
 # IDE files which should
 # be ignored
 
+# VSCode
+.vscode/
+
 # XCode
 *.pbxuser
 *.perspective

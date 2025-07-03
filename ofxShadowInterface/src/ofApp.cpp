@@ -1,5 +1,6 @@
 #include "ofApp.h"
 #include <algorithm>
+#include "SharedData.h"
 
 //--------------------------------------------------------------
 void ofApp::setup()
@@ -12,9 +13,12 @@ void ofApp::setup()
   grayImg.allocate(cam.getWidth(), cam.getHeight());
   bgGray.allocate(cam.getWidth(), cam.getHeight());
   diffImg.allocate(cam.getWidth(), cam.getHeight());
+  warpedImg.allocate(cam.getWidth(), cam.getHeight());
+  isCalibrating = false;
   threshParam.set("Thresh", thresh, 1, 255);
   pinchParam.set("PinchDist", pinchDist, 1, 200);
   gui.setup();
+  gui.add(shadowHandStatus.setup("Shadow Hand Status", ""));
   gui.add(threshParam);
   gui.add(pinchParam);
   rect.setFromCenter(200, 200, 60, 60);
@@ -49,9 +53,15 @@ void ofApp::update()
                                  { return cv::contourArea(a) < cv::contourArea(b); });
       if (cv::contourArea(*it) > 3000)
       {
+        // save contour for drawing
+        contourPts.clear();
+        for (auto &pt : *it)
+          contourPts.emplace_back(pt.x, pt.y);
+
         auto res = detectPinch(*it);
         gesture = res.first;
         center = res.second;
+        shadowHandStatus.setup(gesture);
         if (gesture == "pinch")
         {
           if (!pinchActive)
@@ -72,15 +82,46 @@ void ofApp::update()
           }
         }
       }
+      else
+      {
+        contourPts.clear();
+        hullPts.clear();
+        tipsPts.clear();
+      }
+    }
+    else
+    {
+      contourPts.clear();
+      hullPts.clear();
+      tipsPts.clear();
     }
   }
+
+  // 共有矩形を最新位置で更新
+  sharedRect = rect;
 }
 
 //--------------------------------------------------------------
 void ofApp::draw()
 {
   ofSetColor(255);
-  colorImg.draw(0, 0);
+  if (quadPoints.size() == 4)
+  {
+    cv::Mat src = ofxCv::toCv(colorImg);
+    cv::Mat dst;
+    cv::warpPerspective(src, dst, perspective, src.size());
+    warpedImg.setFromPixels(dst.data, dst.cols, dst.rows);
+    warpedImg.draw(0, 0);
+  }
+  else
+  {
+    colorImg.draw(0, 0);
+    for (auto &p : quadPoints)
+    {
+      ofSetColor(0, 255, 0);
+      ofDrawCircle(p, 5);
+    }
+  }
   ofSetColor(255, 0, 0);
   ofDrawRectangle(rect);
   if (gesture == "pinch")
@@ -88,6 +129,38 @@ void ofApp::draw()
     ofSetColor(255, 255, 0);
     ofDrawCircle(center, 8);
   }
+
+  // draw detected contour
+  if (!contourPts.empty())
+  {
+    ofSetColor(0, 255, 0);
+    ofPolyline poly;
+    for (auto &p : contourPts)
+      poly.addVertex(p.x, p.y);
+    poly.close();
+    poly.draw();
+  }
+
+  // convex hull
+  if (!hullPts.empty())
+  {
+    ofNoFill();
+    ofSetColor(0, 0, 255);
+    ofPolyline hullPoly;
+    for (auto &p : hullPts)
+      hullPoly.addVertex(p);
+    hullPoly.close();
+    hullPoly.draw();
+    ofFill();
+  }
+
+  // fingertip tips
+  for (auto &p : tipsPts)
+  {
+    ofSetColor(255, 0, 0);
+    ofDrawCircle(p, 6);
+  }
+
   gui.draw();
 }
 
@@ -98,6 +171,11 @@ void ofApp::keyPressed(int key)
   {
     bgGray = grayImg;
     bgCaptured = true;
+  }
+  else if (key == 'c')
+  {
+    quadPoints.clear();
+    isCalibrating = true;
   }
   else if (key == 'r')
   {
@@ -127,6 +205,22 @@ void ofApp::mouseDragged(int x, int y, int button)
 //--------------------------------------------------------------
 void ofApp::mousePressed(int x, int y, int button)
 {
+  if (isCalibrating)
+  {
+    quadPoints.push_back(ofPoint(x, y));
+    if (quadPoints.size() == 4)
+    {
+      std::vector<cv::Point2f> src(4), dst(4);
+      for (int i = 0; i < 4; ++i)
+        src[i] = cv::Point2f(quadPoints[i].x, quadPoints[i].y);
+      dst[0] = cv::Point2f(0, 0);
+      dst[1] = cv::Point2f(cam.getWidth(), 0);
+      dst[2] = cv::Point2f(cam.getWidth(), cam.getHeight());
+      dst[3] = cv::Point2f(0, cam.getHeight());
+      perspective = cv::getPerspectiveTransform(src, dst);
+      isCalibrating = false;
+    }
+  }
 }
 
 //--------------------------------------------------------------
@@ -171,7 +265,7 @@ std::pair<std::string, ofPoint> ofApp::detectPinch(const std::vector<cv::Point> 
   std::vector<int> hullIdx;
   cv::convexHull(contour, hullIdx, false, false);
   if (hullIdx.size() < 3)
-    return {"fist", {cx, cy}};
+    return {"fist", {float(cx), float(cy)}};
   std::sort(hullIdx.begin(), hullIdx.end());
   std::vector<cv::Vec4i> defects;
   try
@@ -180,10 +274,10 @@ std::pair<std::string, ofPoint> ofApp::detectPinch(const std::vector<cv::Point> 
   }
   catch (...)
   {
-    return {"fist", {cx, cy}};
+    return {"fist", {float(cx), float(cy)}};
   }
   if (defects.empty())
-    return {"fist", {cx, cy}};
+    return {"fist", {float(cx), float(cy)}};
   std::vector<cv::Point> tips;
   for (auto &d : defects)
   {
@@ -205,10 +299,21 @@ std::pair<std::string, ofPoint> ofApp::detectPinch(const std::vector<cv::Point> 
     cv::Point p2 = uniqueTips[1];
     double dist = cv::norm(p1 - p2);
     ofPoint c((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+    hullPts.clear();
+    tipsPts.clear();
+
+    std::vector<cv::Point> cvHull;
+    cv::convexHull(contour, cvHull);
+    for (auto &hp : cvHull)
+      hullPts.emplace_back(hp.x, hp.y);
+
+    for (auto &tip : uniqueTips)
+      tipsPts.emplace_back(tip.x, tip.y);
+
     if (dist < pinchDist)
       return {"pinch", c};
     else
       return {"open", c};
   }
-  return {"fist", {cx, cy}};
+  return {"fist", {float(cx), float(cy)}};
 }

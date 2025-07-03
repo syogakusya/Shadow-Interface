@@ -37,6 +37,7 @@ public:
 	ofxPanel gui;
 	ofParameter<int> threshParam;
 	ofParameter<int> pinchParam;
+	ofxLabel shadowHandStatus;
 
 	ofRectangle rect;
 	bool dragging;
@@ -46,4 +47,13 @@ public:
 	ofPoint center;
 
 	std::pair<std::string, ofPoint> detectPinch(const std::vector<cv::Point> &contour);
+
+	std::vector<ofPoint> quadPoints;
+	bool isCalibrating;
+	cv::Mat perspective;
+	ofxCvColorImage warpedImg;
+
+	std::vector<ofPoint> contourPts;
+	std::vector<ofPoint> hullPts;
+	std::vector<ofPoint> tipsPts;
 };
