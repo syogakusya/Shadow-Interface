@@ -11,7 +11,7 @@ int main()
 {
 	// GUI ウィンドウ（カメラ + GUI）
 	ofGLFWWindowSettings guiSettings;
-	guiSettings.setSize(800, 600);
+	guiSettings.setSize(1280, 720);
 	guiSettings.setPosition(glm::vec2(50, 50));
 	guiSettings.resizable = true;
 	auto guiWindow = ofCreateWindow(guiSettings);
@@ -32,7 +32,7 @@ int main()
 	ofRunApp(guiWindow, guiApp);
 	ofRunApp(displayWindow, displayApp);
 
-	cout << "b, r, ESC : ブラックレスポンス, リセット, 終了" << endl;
+	cout << "Press 'c' to calibrate, 'r' to reset, 'b' to set background, 'ESC' to exit" << endl;
 
 	ofRunMainLoop();
 }

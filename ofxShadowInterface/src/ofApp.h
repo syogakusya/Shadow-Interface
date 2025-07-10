@@ -35,6 +35,7 @@ public:
 	int pinchDist;
 
 	ofxPanel gui;
+	ofParameter<bool> autoThreshParam;
 	ofParameter<int> threshParam;
 	ofParameter<int> pinchParam;
 	ofxLabel shadowHandStatus;

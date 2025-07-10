@@ -5,9 +5,10 @@
 //--------------------------------------------------------------
 void ofApp::setup()
 {
-  cam.setup(640, 480);
+  cam.setDeviceID(1);
+  cam.setup(1280, 720);
   thresh = 40;
-  pinchDist = 40;
+  pinchDist = 150;
   bgCaptured = false;
   colorImg.allocate(cam.getWidth(), cam.getHeight());
   grayImg.allocate(cam.getWidth(), cam.getHeight());
@@ -16,11 +17,12 @@ void ofApp::setup()
   warpedImg.allocate(cam.getWidth(), cam.getHeight());
   isCalibrating = false;
   threshParam.set("Thresh", thresh, 1, 255);
-  pinchParam.set("PinchDist", pinchDist, 1, 200);
+  pinchParam.set("PinchDist", pinchDist, 1, 1000);
   gui.setup();
   gui.add(shadowHandStatus.setup("Shadow Hand Status", ""));
   gui.add(threshParam);
   gui.add(pinchParam);
+  gui.add(autoThreshParam.set("Auto Thresh", true));
   rect.setFromCenter(200, 200, 60, 60);
   dragging = false;
   pinchActive = false;
@@ -34,6 +36,16 @@ void ofApp::update()
     return;
   colorImg.setFromPixels(cam.getPixels());
   grayImg = colorImg;
+
+  // もしキャリブレーション済みなら、グレースケール画像にも台形補正を適用
+  if (quadPoints.size() == 4)
+  {
+    cv::Mat gMat = ofxCv::toCv(grayImg);
+    cv::Mat gWarped;
+    cv::warpPerspective(gMat, gWarped, perspective, gMat.size());
+    grayImg.setFromPixels(gWarped.data, gWarped.cols, gWarped.rows);
+  }
+
   thresh = threshParam;
   pinchDist = pinchParam;
   if (bgCaptured)
@@ -42,7 +54,18 @@ void ofApp::update()
     cv::Mat bg = ofxCv::toCv(bgGray);
     cv::Mat diff;
     cv::absdiff(g, bg, diff);
-    cv::threshold(diff, diff, thresh, 255, cv::THRESH_BINARY);
+    if (autoThreshParam)
+    {
+      // Otsu で自動決定（返り値が推奨しきい値）
+      double otsu = cv::threshold(diff, diff, 0, 255,
+                                  cv::THRESH_BINARY | cv::THRESH_OTSU);
+      thresh = static_cast<int>(otsu); // GUI スライダーにも反映したいなら
+      threshParam = thresh;            // ←これで表示が追従
+    }
+    else
+    {
+      cv::threshold(diff, diff, thresh, 255, cv::THRESH_BINARY);
+    }
     cv::morphologyEx(diff, diff, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 2);
     diffImg.setFromPixels(diff.data, diff.cols, diff.rows);
     std::vector<std::vector<cv::Point>> contours;
