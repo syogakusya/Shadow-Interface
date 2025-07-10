@@ -4,6 +4,7 @@
 #include "ofxOpenCv.h"
 #include "ofxCv.h"
 #include "ofxGui.h"
+#include "ofxBox2d.h"
 
 class ofApp : public ofBaseApp
 {
@@ -57,4 +58,12 @@ public:
 	std::vector<ofPoint> contourPts;
 	std::vector<ofPoint> hullPts;
 	std::vector<ofPoint> tipsPts;
+
+	ofxBox2d box2d;
+	std::vector<std::shared_ptr<ofxBox2dRect>> boxes;
+	std::shared_ptr<ofxBox2dPolygon> shadowHandBody;
+	bool shadowHandBodyCreated;
+
+	void createShadowHandBody(const std::vector<cv::Point> &contour);
+	void updateShadowHandBody(const std::vector<cv::Point> &contour);
 };

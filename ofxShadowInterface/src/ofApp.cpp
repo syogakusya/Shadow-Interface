@@ -26,6 +26,21 @@ void ofApp::setup()
   rect.setFromCenter(200, 200, 60, 60);
   dragging = false;
   pinchActive = false;
+
+  box2d.init();
+  box2d.setGravity(0, 10);
+  box2d.createGround();
+  box2d.setFPS(60.0);
+
+  shadowHandBodyCreated = false;
+
+  for (int i = 0; i < 5; i++)
+  {
+    auto box = std::make_shared<ofxBox2dRect>();
+    box->setPhysics(3.0, 0.53, 0.1);
+    box->setup(box2d.getWorld(), ofRandom(100, 700), ofRandom(100, 300), 40, 40);
+    boxes.push_back(box);
+  }
 }
 
 //--------------------------------------------------------------
@@ -85,6 +100,16 @@ void ofApp::update()
         gesture = res.first;
         center = res.second;
         shadowHandStatus.setup(gesture);
+
+        if (!shadowHandBodyCreated)
+        {
+          createShadowHandBody(*it);
+        }
+        else
+        {
+          updateShadowHandBody(*it);
+        }
+
         if (gesture == "pinch")
         {
           if (!pinchActive)
@@ -110,6 +135,11 @@ void ofApp::update()
         contourPts.clear();
         hullPts.clear();
         tipsPts.clear();
+        if (shadowHandBodyCreated)
+        {
+          shadowHandBody.reset();
+          shadowHandBodyCreated = false;
+        }
       }
     }
     else
@@ -117,11 +147,18 @@ void ofApp::update()
       contourPts.clear();
       hullPts.clear();
       tipsPts.clear();
+      if (shadowHandBodyCreated)
+      {
+        shadowHandBody.reset();
+        shadowHandBodyCreated = false;
+      }
     }
   }
 
   // 共有矩形を最新位置で更新
   sharedRect = rect;
+
+  box2d.update();
 }
 
 //--------------------------------------------------------------
@@ -184,6 +221,18 @@ void ofApp::draw()
     ofDrawCircle(p, 6);
   }
 
+  for (auto &box : boxes)
+  {
+    ofSetColor(255, 0, 0);
+    box->draw();
+  }
+
+  if (shadowHandBody)
+  {
+    ofSetColor(0, 255, 255, 100);
+    shadowHandBody->draw();
+  }
+
   gui.draw();
 }
 
@@ -205,6 +254,7 @@ void ofApp::keyPressed(int key)
     bgCaptured = false;
     dragging = false;
     pinchActive = false;
+    rect.setFromCenter(200, 200, 60, 60);
   }
   else if (key == OF_KEY_ESC)
   {
@@ -298,6 +348,40 @@ std::pair<std::string, ofPoint> ofApp::detectPinch(const std::vector<cv::Point> 
   catch (...)
   {
     return {"fist", {float(cx), float(cy)}};
+  }
+  return {"fist", {float(cx), float(cy)}};
+}
+
+void ofApp::createShadowHandBody(const std::vector<cv::Point> &contour)
+{
+  if (contour.size() < 3)
+    return;
+
+  std::vector<ofPoint> simplifiedContour;
+  for (const auto &pt : contour)
+  {
+    simplifiedContour.emplace_back(pt.x, pt.y);
+  }
+
+  shadowHandBody = std::make_shared<ofxBox2dPolygon>();
+  shadowHandBody->setPhysics(1.0, 0.3, 0.1);
+  shadowHandBody->setup(box2d.getWorld(), simplifiedContour);
+  shadowHandBodyCreated = true;
+}
+
+void ofApp::updateShadowHandBody(const std::vector<cv::Point> &contour)
+{
+  {
+    if (!shadowHandBody || contour.size() < 3)
+      return;
+
+    std::vector<ofPoint> simplifiedContour;
+    for (const auto &pt : contour)
+    {
+      simplifiedContour.emplace_back(pt.x, pt.y);
+    }
+
+    shadowHandBody->updatePolygon(simplifiedContour);
   }
   if (defects.empty())
     return {"fist", {float(cx), float(cy)}};
