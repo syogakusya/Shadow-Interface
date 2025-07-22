@@ -4,6 +4,7 @@
 #include "ofxOpenCv.h"
 #include "ofxCv.h"
 #include "ofxGui.h"
+#include "GestureDetector.h"
 
 class ofApp : public ofBaseApp
 {
@@ -33,28 +34,36 @@ public:
 	bool bgCaptured;
 	int thresh;
 	int pinchDist;
+	int minPinchDist;
+	int minArea;
+	int maxArea;
+	int minDistance;
+	int shadowMargin;
+	int maxContours;
 
 	ofxPanel gui;
 	ofParameter<bool> autoThreshParam;
 	ofParameter<int> threshParam;
 	ofParameter<int> pinchParam;
+	ofParameter<int> minPinchParam;
+	ofParameter<int> minAreaParam;
+	ofParameter<int> maxAreaParam;
+	ofParameter<int> minDistanceParam;
+	ofParameter<int> shadowMarginParam;
+	ofParameter<int> maxContoursParam;
 	ofxLabel shadowHandStatus;
 
 	ofRectangle rect;
 	bool dragging;
 	bool pinchActive;
 
-	std::string gesture;
-	ofPoint center;
-
-	std::pair<std::string, ofPoint> detectPinch(const std::vector<cv::Point> &contour);
+	std::vector<std::string> gestures;
+	std::vector<ofPoint> centers;
 
 	std::vector<ofPoint> quadPoints;
 	bool isCalibrating;
 	cv::Mat perspective;
 	ofxCvColorImage warpedImg;
 
-	std::vector<ofPoint> contourPts;
-	std::vector<ofPoint> hullPts;
-	std::vector<ofPoint> tipsPts;
+	GestureDetector gestureDetector;
 };

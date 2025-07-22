@@ -1,6 +1,7 @@
 #include "ofApp.h"
 #include <algorithm>
 #include "SharedData.h"
+#include "GestureDetector.h"
 
 //--------------------------------------------------------------
 void ofApp::setup()
@@ -9,6 +10,12 @@ void ofApp::setup()
   cam.setup(1280, 720);
   thresh = 40;
   pinchDist = 150;
+  minPinchDist = 10;
+  minArea = 2000;
+  maxArea = 50000;
+  minDistance = 100;
+  shadowMargin = 30;
+  maxContours = 3;
   bgCaptured = false;
   colorImg.allocate(cam.getWidth(), cam.getHeight());
   grayImg.allocate(cam.getWidth(), cam.getHeight());
@@ -18,11 +25,23 @@ void ofApp::setup()
   isCalibrating = false;
   threshParam.set("Thresh", thresh, 1, 255);
   pinchParam.set("PinchDist", pinchDist, 1, 1000);
+  minPinchParam.set("Min PinchDist", minPinchDist, 1, 200);
+  minAreaParam.set("Min Area", minArea, 100, 10000);
+  maxAreaParam.set("Max Area", maxArea, 10000, 1000000);
+  minDistanceParam.set("Min Distance", minDistance, 0, 300);
+  shadowMarginParam.set("Shadow Margin", shadowMargin, 0, 100);
+  maxContoursParam.set("Max Contours", maxContours, 1, 10);
   gui.setup();
   gui.add(shadowHandStatus.setup("Shadow Hand Status", ""));
   gui.add(threshParam);
   gui.add(pinchParam);
+  gui.add(minPinchParam);
   gui.add(autoThreshParam.set("Auto Thresh", true));
+  gui.add(minAreaParam);
+  gui.add(maxAreaParam);
+  gui.add(minDistanceParam);
+  gui.add(shadowMarginParam);
+  gui.add(maxContoursParam);
   rect.setFromCenter(200, 200, 60, 60);
   dragging = false;
   pinchActive = false;
@@ -48,76 +67,190 @@ void ofApp::update()
 
   thresh = threshParam;
   pinchDist = pinchParam;
+  minPinchDist = minPinchParam;
+  minArea = minAreaParam;
+  maxArea = maxAreaParam;
+  minDistance = minDistanceParam;
+  shadowMargin = shadowMarginParam;
+  maxContours = maxContoursParam;
   if (bgCaptured)
   {
     cv::Mat g = ofxCv::toCv(grayImg);
     cv::Mat bg = ofxCv::toCv(bgGray);
+
+    // 現在の矩形位置とその影響範囲を背景画像で置き換え（背景差分前に実行）
+    cv::Rect cvRect(rect.x, rect.y, rect.width, rect.height);
+
+    // 影の範囲も考慮して拡張（矩形の周囲も除外）
+    cv::Rect expandedRect(
+        std::max(0, cvRect.x - shadowMargin),
+        std::max(0, cvRect.y - shadowMargin),
+        std::min(g.cols - std::max(0, cvRect.x - shadowMargin), cvRect.width + shadowMargin * 2),
+        std::min(g.rows - std::max(0, cvRect.y - shadowMargin), cvRect.height + shadowMargin * 2));
+
+    if (expandedRect.x >= 0 && expandedRect.y >= 0 &&
+        expandedRect.x + expandedRect.width <= g.cols &&
+        expandedRect.y + expandedRect.height <= g.rows)
+    {
+      bg(expandedRect).copyTo(g(expandedRect));
+    }
+
     cv::Mat diff;
     cv::absdiff(g, bg, diff);
+
+    // 背景差分なしの場合の前処理を強化
     if (autoThreshParam)
     {
-      // Otsu で自動決定（返り値が推奨しきい値）
+      // ガウシアンブラーで滑らかにしてからOtsu
+      cv::GaussianBlur(diff, diff, cv::Size(5, 5), 0);
       double otsu = cv::threshold(diff, diff, 0, 255,
                                   cv::THRESH_BINARY | cv::THRESH_OTSU);
-      thresh = static_cast<int>(otsu); // GUI スライダーにも反映したいなら
-      threshParam = thresh;            // ←これで表示が追従
+      thresh = static_cast<int>(otsu);
+      threshParam = thresh;
     }
     else
     {
+      cv::GaussianBlur(diff, diff, cv::Size(5, 5), 0);
       cv::threshold(diff, diff, thresh, 255, cv::THRESH_BINARY);
     }
-    cv::morphologyEx(diff, diff, cv::MORPH_CLOSE, cv::Mat(), cv::Point(-1, -1), 2);
+
+    // モルフォロジー演算を強化
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+    cv::morphologyEx(diff, diff, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 1);
+    cv::morphologyEx(diff, diff, cv::MORPH_CLOSE, kernel, cv::Point(-1, -1), 2);
     diffImg.setFromPixels(diff.data, diff.cols, diff.rows);
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(diff, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     if (!contours.empty())
     {
-      auto it = std::max_element(contours.begin(), contours.end(), [](const auto &a, const auto &b)
-                                 { return cv::contourArea(a) < cv::contourArea(b); });
-      if (cv::contourArea(*it) > 3000)
-      {
-        // save contour for drawing
-        contourPts.clear();
-        for (auto &pt : *it)
-          contourPts.emplace_back(pt.x, pt.y);
+      // 手らしい輪郭を複数選択（面積、形状、位置を考慮）
+      std::vector<std::pair<std::vector<cv::Point>, double>> validContours;
 
-        auto res = detectPinch(*it);
-        gesture = res.first;
-        center = res.second;
-        shadowHandStatus.setup(gesture);
-        if (gesture == "pinch")
+      for (auto &contour : contours)
+      {
+        double area = cv::contourArea(contour);
+        if (area < minArea || area > maxArea)
+          continue; // 面積フィルタ
+
+        // 輪郭の重心を計算
+        cv::Moments M = cv::moments(contour);
+        if (M.m00 == 0)
+          continue;
+        cv::Point2f centroid(M.m10 / M.m00, M.m01 / M.m00);
+
+        // 矩形から離れているかチェック（手は矩形から離れているはず）
+        double distFromRect = cv::norm(centroid - cv::Point2f(rect.getCenter().x, rect.getCenter().y));
+        if (distFromRect < minDistance)
+          continue; // 矩形に近すぎる場合は除外
+
+        // 形状の複雑さをチェック（手は複雑な形状）
+        double perimeter = cv::arcLength(contour, true);
+        double complexity = perimeter * perimeter / area; // 複雑さの指標
+
+        // スコア計算（面積と複雑さのバランス）
+        double score = area * (complexity / 20.0) * (distFromRect / 200.0);
+
+        if (score > 1000) // 最小スコア閾値
         {
-          if (!pinchActive)
+          validContours.push_back({contour, score});
+        }
+      }
+
+      // スコア順でソート
+      std::sort(validContours.begin(), validContours.end(),
+                [](const auto &a, const auto &b)
+                { return a.second > b.second; });
+
+      // 複数の有効な輪郭を処理（最大数を制限）
+      gestures.clear();
+      centers.clear();
+      bool anyPinch = false;
+      bool anyPinchInRect = false;
+
+      int processedCount = 0;
+      for (auto &validContour : validContours)
+      {
+        if (processedCount >= maxContours)
+          break;
+        if (cv::contourArea(validContour.first) > 3000)
+        {
+          // 輪郭を滑らかにする
+          std::vector<cv::Point> smoothedContour;
+          cv::approxPolyDP(validContour.first, smoothedContour, 5, true);
+
+          gestureDetector.setPinchDistance(pinchDist, minPinchDist);
+          auto res = gestureDetector.detect(smoothedContour);
+
+          for (auto &p : res)
           {
-            if (rect.inside(center))
-              dragging = true;
-            pinchActive = true;
+            gestures.push_back(p.first);
+            centers.push_back(p.second);
+            if (p.first == "pinch")
+            {
+              anyPinch = true;
+              if (rect.inside(p.second))
+                anyPinchInRect = true;
+            }
           }
-          if (dragging)
-            rect.setFromCenter(center, rect.getWidth(), rect.getHeight());
+          processedCount++;
+        }
+      }
+
+      // 有効な輪郭が見つかった場合
+      if (!gestures.empty())
+      {
+        if (anyPinch)
+        {
+          // ピンチが矩形内にあればドラッグ開始 / 継続
+          if (anyPinchInRect)
+            dragging = true;
+
+          if (dragging && !centers.empty())
+          {
+            // 矩形内のピンチのみを抽出
+            std::vector<ofPoint> pinchedCenters;
+            for (size_t i = 0; i < gestures.size(); ++i)
+            {
+              if (gestures[i] == "pinch" && rect.inside(centers[i]))
+              {
+                pinchedCenters.push_back(centers[i]);
+              }
+            }
+
+            if (!pinchedCenters.empty())
+            {
+              // 複数ピンチの重心で矩形を移動
+              ofPoint centroid(0, 0);
+              for (auto &p : pinchedCenters)
+              {
+                centroid += p;
+              }
+              centroid /= pinchedCenters.size();
+              ofLog() << "centroid: " << centroid << endl;
+
+              // 移動のみ（サイズ変更は削除）
+              rect.setFromCenter(centroid, rect.getWidth(), rect.getHeight());
+            }
+          }
         }
         else
         {
-          if (pinchActive)
-          {
-            dragging = false;
-            pinchActive = false;
-          }
+          // ピンチが無ければドラッグ解除
+          dragging = false;
         }
+        // ステータス表示は最初のジェスチャのみ
+        if (!gestures.empty())
+          shadowHandStatus.setup(gestures[0]);
       }
       else
       {
-        contourPts.clear();
-        hullPts.clear();
-        tipsPts.clear();
+        gestureDetector.clear();
       }
     }
-    else
-    {
-      contourPts.clear();
-      hullPts.clear();
-      tipsPts.clear();
-    }
+  }
+  else
+  {
+    gestureDetector.clear();
   }
 
   // 共有矩形を最新位置で更新
@@ -147,13 +280,31 @@ void ofApp::draw()
   }
   ofSetColor(255, 0, 0);
   ofDrawRectangle(rect);
-  if (gesture == "pinch")
+
+  // ピンチ地点の描画を改善
+  for (size_t i = 0; i < gestures.size(); ++i)
   {
-    ofSetColor(255, 255, 0);
-    ofDrawCircle(center, 8);
+    if (gestures[i] == "pinch")
+    {
+      // 矩形内のピンチは緑、矩形外は黄色
+      if (rect.inside(centers[i]))
+      {
+        ofSetColor(0, 255, 0); // 緑
+      }
+      else
+      {
+        ofSetColor(255, 255, 0); // 黄色
+      }
+      ofDrawCircle(centers[i], 10);
+
+      // ピンチ中心に小さい白い点
+      ofSetColor(255, 255, 255);
+      ofDrawCircle(centers[i], 3);
+    }
   }
 
   // draw detected contour
+  const auto &contourPts = gestureDetector.getContourPts();
   if (!contourPts.empty())
   {
     ofSetColor(0, 255, 0);
@@ -165,6 +316,7 @@ void ofApp::draw()
   }
 
   // convex hull
+  const auto &hullPts = gestureDetector.getHullPts();
   if (!hullPts.empty())
   {
     ofNoFill();
@@ -178,10 +330,33 @@ void ofApp::draw()
   }
 
   // fingertip tips
+  const auto &tipsPts = gestureDetector.getTipsPts();
   for (auto &p : tipsPts)
   {
-    ofSetColor(255, 0, 0);
-    ofDrawCircle(p, 6);
+    // ピンチ中心から近い指先は赤、そうでなければオレンジ
+    bool nearPinch = false;
+    for (size_t i = 0; i < gestures.size(); ++i)
+    {
+      if (gestures[i] == "pinch")
+      {
+        float dist = ofDist(p.x, p.y, centers[i].x, centers[i].y);
+        if (dist < pinchDist * 0.7f)
+        { // ピンチ距離の70%以内
+          nearPinch = true;
+          break;
+        }
+      }
+    }
+
+    if (nearPinch)
+    {
+      ofSetColor(255, 0, 0); // 赤（ピンチに使用中）
+    }
+    else
+    {
+      ofSetColor(255, 165, 0); // オレンジ（通常の指先）
+    }
+    ofDrawCircle(p, 4);
   }
 
   gui.draw();
@@ -205,6 +380,7 @@ void ofApp::keyPressed(int key)
     bgCaptured = false;
     dragging = false;
     pinchActive = false;
+    rect.setFromCenter(200, 200, 60, 60);
   }
   else if (key == OF_KEY_ESC)
   {
@@ -274,69 +450,4 @@ void ofApp::gotMessage(ofMessage msg)
 //--------------------------------------------------------------
 void ofApp::dragEvent(ofDragInfo dragInfo)
 {
-}
-
-std::pair<std::string, ofPoint> ofApp::detectPinch(const std::vector<cv::Point> &contour)
-{
-  cv::Moments M = cv::moments(contour);
-  int cx = 0, cy = 0;
-  if (M.m00 != 0)
-  {
-    cx = int(M.m10 / M.m00);
-    cy = int(M.m01 / M.m00);
-  }
-  std::vector<int> hullIdx;
-  cv::convexHull(contour, hullIdx, false, false);
-  if (hullIdx.size() < 3)
-    return {"fist", {float(cx), float(cy)}};
-  std::sort(hullIdx.begin(), hullIdx.end());
-  std::vector<cv::Vec4i> defects;
-  try
-  {
-    cv::convexityDefects(contour, hullIdx, defects);
-  }
-  catch (...)
-  {
-    return {"fist", {float(cx), float(cy)}};
-  }
-  if (defects.empty())
-    return {"fist", {float(cx), float(cy)}};
-  std::vector<cv::Point> tips;
-  for (auto &d : defects)
-  {
-    if (d[3] / 256 < 10)
-      continue;
-    tips.push_back(contour[d[0]]);
-    tips.push_back(contour[d[1]]);
-  }
-  std::vector<cv::Point> uniqueTips;
-  for (auto &p : tips)
-  {
-    if (std::find_if(uniqueTips.begin(), uniqueTips.end(), [&](const auto &q)
-                     { return p == q; }) == uniqueTips.end())
-      uniqueTips.push_back(p);
-  }
-  if (uniqueTips.size() >= 2)
-  {
-    cv::Point p1 = uniqueTips[0];
-    cv::Point p2 = uniqueTips[1];
-    double dist = cv::norm(p1 - p2);
-    ofPoint c((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-    hullPts.clear();
-    tipsPts.clear();
-
-    std::vector<cv::Point> cvHull;
-    cv::convexHull(contour, cvHull);
-    for (auto &hp : cvHull)
-      hullPts.emplace_back(hp.x, hp.y);
-
-    for (auto &tip : uniqueTips)
-      tipsPts.emplace_back(tip.x, tip.y);
-
-    if (dist < pinchDist)
-      return {"pinch", c};
-    else
-      return {"open", c};
-  }
-  return {"fist", {float(cx), float(cy)}};
 }
